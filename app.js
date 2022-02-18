@@ -1,34 +1,20 @@
-import 'dotenv/config';
-import bodyParser from 'body-parser';
-import express from 'express';
-const app = express();
+import 'dotenv/config';                                     //add .env file
+import bodyParser from 'body-parser';                       //add body-parser
+import express from 'express';                              //add express
+import session from 'express-session';                      //add express-session
+import passport from 'passport';                            //add pasport
+import LocalStrategy from 'passport-local';                 //add pasport-local lirary
+import bcrypt from 'bcrypt';                                //add dcrypt
+import {users, findByUsername, findById} from './db.js'     //connect file with user object 
 
-import session from 'express-session';
-import {users} from './db.js'
-const port = process.env.PORT || 3000;
-const IN_PROD = process.env.NODE_ENV === 'production';
+const app = express();                                      //create express var
+const port = process.env.PORT || 3000;                      //create PORT variable
+const IN_PROD = process.env.NODE_ENV === 'production';      //create production for secure session
 
-const redirectLogin = (req, res, next) => {
-  if(!req.session.userId) {
-      res.redirect('/login');
-  } else {
-      next();
-  }
-}
 
-const redirectHome = (req, res, next) => {
-  if(req.session.userId) {
-      res.redirect('/home');
-  } else {
-      next();
-  }
-}
+app.set('view engine', 'ejs');                              //set default render
 
-// Parse JSON request
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }))
-
-// session config
+//session config
 app.use(session({
   name: process.env.SESS_NAME,
   resave: false,
@@ -41,13 +27,68 @@ app.use(session({
   }
 }))
 
-// add routers
+//function for redirect if user not loged in
+const redirectLogin = (req, res, next) => {
+  if(!req.user) {
+      res.redirect('/login');
+  } else {
+      next();
+  }
+}
+
+//function for redirect if user authorized
+const redirectHome = (req, res, next) => {
+  if(req.user) {
+      res.redirect('/home');
+  } else {
+      next();
+  }
+}
+
+// Passport Config
+app.use(passport.initialize());
+app.use(passport.session());
+app.use(passport.authenticate('session'));
+
+//set default pasport LocalStrategy
+passport.use(
+  new LocalStrategy(function verify(username, password, done) {
+      findByUsername(username, async function (err, user) {
+      password = await bcrypt.hash(password, user.salt);
+      const matchedPassword = await bcrypt.compare(password, user.password);
+      if (err) return done(err);
+      if (!user) return done(null, false);
+      if (matchedPassword) { 
+                  console.log('wrong password')
+                  return done(null, false); }
+      return done(null, user);
+  });
+}));
+
+passport.serializeUser((user, done) => {
+  done(null, user.id);
+});
+
+passport.deserializeUser((id, done) => {
+  findById(id, function (err, user) {
+    if (err) {
+      return done(err);
+    }
+    done(null, user);
+  });
+});
+
+//parse JSON
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }))
+
+//add routers
 app.get('/', (req, res) => {
-  const {userId} = req.session;
+  const {id} = req.user || 0;
 
   res.send(`
       <h1>Welcome!!!</h1>
-      ${userId ? `
+      ${id ? `
           <a href = '/home'>Home</a>
           <form method='post' action='/logout'>
               <button>Logout</button>
@@ -60,78 +101,49 @@ app.get('/', (req, res) => {
 });
 
 app.get('/home', redirectLogin, (req, res) => {
-  const user = users.find(
-      user => user.id === req.session.userId
-  )
-  
-  res.send(`
-      <h1>Home</h1>
-      <a href='/'>Main</a>
-      <ul>
-          <li>Name: ${user.name} </li>
-          <li>Email: ${user.email} </li>
-      </ul>
-  `)
+  res.render('home', {name: req.user.name, email: req.user.username})
 });
 
-app.get('/login', redirectHome, (req, res) => {
-  res.send(`
-      <h1>Login</h1>
-      <form method='post' action'/login'> 
-          <input type='email' name='email' placeholder='Email' required />
-          <input type='password' name='password' placeholder='Password' required />
-          <input type='submit' />
-      </form>
-      <a href='/register'>Register</a>
-  `)
-});
+app.get('/login', redirectHome, function(req, res, next) {
+  res.render('login')
+})
 
 app.get('/register', redirectHome, (req, res) => {
-  res.send(`
-      <h1>Register</h1>
-      <form method='post' action'/register'> 
-          <input type='name' name='name' placeholder='Name' required />
-          <input type='email' name='email' placeholder='Email' required />
-          <input type='password' name='password' placeholder='Password' required />
-          <input type='submit' />
-      </form>
-      <a href='/login'>Login</a>
-  `)
+  res.render('register')
+})
+
+app.post('/login', 
+        passport.authenticate('local', {failureRedirect: '/login'}), 
+        (req, res) => {
+          res.redirect('/home');
 });
 
-app.post('/login', redirectHome, (req, res) => {
-  const {email, password} = req.body;
+app.post('/register', async (req, res, next) => {
+  const {name, username, password} = req.body;
 
-  if(email&&password) {
-      const user = users.find(
-          user => user.email === email && user.password === password
-      )
-
-      if(user) {
-          req.session.userId = user.id;
-          return res.redirect('/home');
-      }
-  }
-  return res.redirect('/login');
-});
-
-app.post('/register', redirectHome, (req, res) => {
-  const {name, email, password} = req.body;
-
-  if (name&&email&&password) {
+  if (name&&username&&password) {
       const exist = users.some(
-          user => user.email === email
+          user => user.username === username
       )
 
+      // Generate salt
+      const salt = await bcrypt.genSalt(10);
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, salt);
+            
       if (!exist) {
           const user = {
               id: users.length + 1,
               name: name,
-              email: email,
-              password: password,
+              username: username,
+              password: hashedPassword,
+              salt: salt,
           };
           users.push(user);
-          req.session.userId = user.id;
+
+          req.login(user, function(err) {
+            if (err) { return next(err); }
+          });
           return res.redirect('/home')
       }
   }
@@ -139,17 +151,11 @@ app.post('/register', redirectHome, (req, res) => {
 });
 
 app.post('/logout', redirectLogin, (req, res) => {
-  req.session.destroy((err) => {
-      if(err) {
-          return res.redirect('/home');
-      }
-
-      res.clearCookie(process.env.SESS_NAME);
-      res.redirect('/login');
-  })
+  req.logout();
+  res.redirect('/login');
 });
 
-
+//start server listening
 app.listen(port, console.log(
   `http://test:${port}`
 ))
